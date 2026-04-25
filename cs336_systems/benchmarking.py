@@ -1,3 +1,4 @@
+import cs336_basics.transformer as transformer
 from cs336_basics.transformer import *
 from cs336_basics.training import *
 import argparse
@@ -9,14 +10,19 @@ import numpy as np
 import os
 import torch.cuda.nvtx as nvtx
 
-@nvtx.range("scaled_dot_product_attention")
-def scaled_dot_product_attention(Q,K,V, mask):
-    logits = einsum(Q, K, " ... q d, ... k d -> ... q k ") /(Q.shape[-1]**0.5)
-    if mask is not None:
-        logits = torch.where(mask, logits, -torch.inf)
-    scores = softmax(logits, -1)
-    return scores @ V
+@nvtx.range("scaled dot product attention")
+def annotated_scaled_dot_product_attention(Q,K,V, mask):
+    with nvtx.range("computing attention scores"):
+        logits = einsum(Q, K, " ... q d, ... k d -> ... q k ") /(Q.shape[-1]**0.5)
+        if mask is not None:
+            logits = torch.where(mask, logits, -torch.inf)
+    with nvtx.range("computing softmax"):
+        scores = softmax(logits, -1)
+    with nvtx.range("final matmul"):
+        result = scores @ V
+    return result
 
+transformer.scaled_dot_product_attention = annotated_scaled_dot_product_attention
 def main(config):
     model = TransformerLM(config["vocab_size"], config["context_length"],
                           config["d_model"], config["num_layers"], 

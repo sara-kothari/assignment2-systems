@@ -1,5 +1,5 @@
 {
-    "mode": "fwd_bwd_optim",
+    "mode": "fwd_only",
     "model": "small",
     "vocab_size": 10000,
     "context_length": 512,
@@ -16,7 +16,7 @@
     "weight_decay": 0.1,
     "batch_size": 4,
     "total_steps": 10,
-    "warmup_steps": 1,
+    "warmup_steps": 5,
     "grad_clip_max_norm": 1.0,
     "eval_interval": 100,
     "checkpoint_interval": 2500,
