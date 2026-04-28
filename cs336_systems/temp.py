@@ -1,4 +1,5 @@
 import pandas as pd
-df = pd.read_csv("data/2_1_3/results_2_1_3_1warmup.csv", on_bad_lines='skip')
-print(df.to_latex())
+df = pd.read_csv("data/results_fa_v_torch.csv", on_bad_lines='skip')
+# df =
+print(df.to_latex(index=False))
 

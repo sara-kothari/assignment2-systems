@@ -1,7 +1,9 @@
 {
-    "mode": "fwd_only",
+    "mode": "fwd_bwd_optim",
     "model": "small",
+    "precision": "full", 
     "vocab_size": 10000,
+    "mem_profile": false,
     "context_length": 512,
     "d_model": 768,
     "num_layers": 12,

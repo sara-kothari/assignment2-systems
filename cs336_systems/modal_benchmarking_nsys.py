@@ -22,14 +22,15 @@ def benchmark(config):
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
         json.dump(config, f)
         config_path = f.name
+
     cmd = (
-        "PYTORCH_ALLOC_CONF=backend:cudaMallocAsync "
-        "PYTORCH_NO_CUDA_MEMORY_CACHING=1 "
-        "nsys profile -o /tmp/profile_result "
-        "--trace=cuda,cudnn,cublas,nvtx "
-        "--pytorch=autograd-nvtx "
-        "--gpu-metrics-devices=0 "
-        f"-- python /profiling/cs336_systems/benchmarking.py --config {config_path}"
+    "PYTORCH_ALLOC_CONF=backend:cudaMallocAsync "
+    "PYTORCH_NO_CUDA_MEMORY_CACHING=1 "
+    "nsys profile -o /tmp/profile_result "
+    "--trace=cuda,cudnn,cublas,nvtx "
+    "--pytorch=autograd-nvtx "
+    "--gpu-metrics-devices=0 "
+    f"-- python -m cs336_systems.benchmarking --config {config_path}"
     )
     subprocess.run(cmd, shell=True, check=True)
     shutil.copy("/tmp/profile_result.nsys-rep", f"{DATA_PATH}/profile_result.nsys-rep")

@@ -11,11 +11,11 @@ def fetch_file(filename: str) -> bytes:
 
 @app.local_entrypoint()
 def download_from_modal():
-    filename ="2_1_3/results_2_1_3.csv"
+    filename ="results_fa_v_torch.csv"
 
     data = fetch_file.remote(filename)
 
-    local_path = Path("data/2_1_3/results_2_1_3.csv")
+    local_path = Path("data/results_fa_v_torch.csv")
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
     local_path.write_bytes(data)

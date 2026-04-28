@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import os
 import torch.cuda.nvtx as nvtx
+from contextlib import nullcontext
 
 @nvtx.range("scaled dot product attention")
 def annotated_scaled_dot_product_attention(Q,K,V, mask):
@@ -28,25 +29,37 @@ def main(config):
                           config["d_model"], config["num_layers"], 
                           config["num_heads"], config["d_ff"], config["rope_theta"])
     model.to(config["device"])
+    model = torch.compile(model)
     optimizer = AdamW(model.parameters(), (config["beta1"], config["beta2"]), config["eps"], config["weight_decay"], config["lr"])
     mode = config["mode"]
     model.train()
     data = torch.randint(low=0, high=config["vocab_size"]-1, size=(config["batch_size"], config["context_length"]), device=config["device"])
     targets = torch.randint(low=0, high=config["vocab_size"]-1, size=(config["batch_size"], config["context_length"]),device=config["device"])
     timings = []
+    if config["precision"] == "mixed":
+        context= torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    else:
+        context = nullcontext()
     
     if (mode == "fwd_only"):
         for step in range(1,config["warmup_steps"]+1):
             with torch.inference_mode():
                 logits = model(data)
+        if (config["mem_profile"]):
+            print("mem profiling")
+            torch.cuda.memory._record_memory_history(max_entries=1000000)
         for step in range(1, config["total_steps"] + 1):
             start = timeit.default_timer()
             with torch.inference_mode():
                 with nvtx.range("forward"):
-                    logits = model(data)
+                    with context:
+                        logits = model(data)
             torch.cuda.synchronize()
             end = timeit.default_timer()
             timings.append(end - start)
+        if (config["mem_profile"]):
+            torch.cuda.memory._dump_snapshot(f"data/memory_snapshot_{mode}_{config["context_length"]}_{config["precision"]}.pickle")
+            torch.cuda.memory._record_memory_history(enabled=None)
                 
     if (mode == "fwd_bwd"):
         model.train()
@@ -58,11 +71,12 @@ def main(config):
         for step in range(1, config["total_steps"] + 1):
             optimizer.zero_grad()
             start = timeit.default_timer()
-            with nvtx.range("forward"):
-                logits = model(data)
-                loss = cross_entropy_loss(logits, targets)
-            with nvtx.range("backward"):
-                loss.backward()
+            with context:
+                with nvtx.range("forward"):
+                    logits = model(data)
+                    loss = cross_entropy_loss(logits, targets)
+                with nvtx.range("backward"):
+                    loss.backward()
             torch.cuda.synchronize()
             end = timeit.default_timer()
             timings.append(end - start)
@@ -75,6 +89,8 @@ def main(config):
             loss = cross_entropy_loss(logits, targets)
             loss.backward()
             optimizer.step()
+        if (config["mem_profile"]):
+            torch.cuda.memory._record_memory_history(max_entries=1000000)
         for step in range(1, config["total_steps"] + 1):
             start = timeit.default_timer()
             optimizer.zero_grad()
@@ -88,6 +104,9 @@ def main(config):
             torch.cuda.synchronize()
             end = timeit.default_timer()
             timings.append(end - start)
+        if (config["mem_profile"]):
+            torch.cuda.memory._dump_snapshot(f"data/memory_snapshot_{mode}_{config["context_length"]}_{config["precision"]}.pickle")
+            torch.cuda.memory._record_memory_history(enabled=None)
     results = {
         "model": config["model"], 
         "mode": mode,

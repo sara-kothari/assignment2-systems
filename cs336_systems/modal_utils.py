@@ -24,8 +24,8 @@ def build_image(*, include_tests: bool = False) -> modal.Image:
     
     image = image.add_local_dir("cs336_basics_mine", remote_path="/.uv/cs336_basics_mine", copy=True)
     image = image.uv_sync()
+    image = image.run_commands("pip install -e /.uv/cs336_basics_mine")
     image = image.add_local_python_source("cs336_systems")
-    image = image.add_local_dir(".", remote_path="/profiling")
     if include_tests:
         image = image.add_local_dir("tests", remote_path="/root/tests")
     return image

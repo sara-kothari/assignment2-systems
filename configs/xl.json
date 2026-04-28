@@ -1,6 +1,8 @@
 {
     "model": "xl",
-    "mode": "fwd_only",
+    "precision": "full", 
+    "mode": "fwd_bwd_optim",
+    "mem_profile": false,
     "vocab_size": 10000,
     "context_length": 512,
     "d_model": 2560,
