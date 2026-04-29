@@ -6,8 +6,16 @@ import timeit
 import numpy as np
 import torch.nn as nn
 from cs336_basics.training import *
-from cs336_basics.transformer import *
+from cs336_basics.model import *
+import time
+def shard_param(param, rank, world_size):
+        dim0 = param.shape[0]
+        assert dim0 % world_size == 0
+        shard_size = dim0 // world_size
+        start = rank * shard_size
+        end = (rank + 1) * shard_size
 
+        return param.data[start:end].clone()
 
 
 class FSDP(nn.Module):
@@ -15,89 +23,78 @@ class FSDP(nn.Module):
         super().__init__()
         self.handles = []
         self.module = module
+        self.compute_dype = compute_dtype
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         self.sharded_layers = []
-        self.cur_layer = 0
-        count = 0
-        self.compute_dtype = compute_dtype
-        #broadcast each
+        
+        #broadcast the data to ensure same initialization
         for param in self.module.parameters():
             dist.broadcast(param.data, src=0)
+            
         
-        def all_gather_hook(layer,input ):
-            full_weight=torch.empty(layer.weight.shape[0]*self.world_size, *layer.weight.shape[1:], device=layer.weight.device, dtype=layer.weight.dtype)
-            handle = dist.all_gather_into_tensor(full_weight,layer.weight, async_op=False)
+        def all_gather_forward_pre_hook(layer, inputs):
+            
+            full= torch.empty(layer.weight.shape[0]*self.world_size, *layer.weight.shape[1:], device=layer.weight.device, dtype=torch.float32)
+            dist.all_gather_into_tensor(full, layer.weight.data)
+            layer.original_shard = layer.weight.data
             if compute_dtype is not None:
-                full_weight = full_weight.to(compute_dtype)
-            layer.weight = nn.Parameter(full_weight)
-            self.handles.append(handle)
-        
-        
-            
-        # def shard_and_delete(layer, input, output):
-        #     old = layer.weight.data
-        #     split = layer.weight.shape[0]//self.world_size
-        #     layer.weight = nn.Parameter(layer.weight[split*self.rank: split*(self.rank + 1)].to(torch.float32))
-        #     del old
-        
-        
-            
-        #idk about the timing for this one. 
-        def reduce_scatter_hook(layer,g_in, g_out):
-            # handle = dist.all_reduce(param.grad.data, async_op=True)
-            output = torch.empty((layer.weight.shape[0]//self.world_size, *layer.weight.shape[1:]),device=layer.weight.device, dtype=layer.weight.dtype )
-            handle = dist.reduce_scatter_tensor(output, layer.weight.grad, async_op=False)
-            layer.weight.grad = output
-            self.handles.append(handle)
+                full = full.to(compute_dtype)
+            layer.weight.data = full
+            print("okay gather")
+            if compute_dtype is not None and not isinstance(layer, (Embedding, nn.Embedding)):
+                return (inputs[0].to(compute_dtype),)
         
         
         for name, layer in self.module.named_modules():
             if isinstance(layer, (Linear, Embedding, nn.Linear, nn.Embedding)):
-                
+                shard = shard_param(layer.weight,self.rank, self.world_size)
+                layer.weight = nn.Parameter(shard)
                 self.sharded_layers.append(layer)
-                split = layer.weight.shape[0]//self.world_size
-                layer.weight = nn.Parameter(layer.weight[split*self.rank: split*(self.rank + 1)])
-                layer.register_full_backward_hook(hook=reduce_scatter_hook)
-                if (count == 0 or count == 1):
-                    layer.register_forward_pre_hook(all_gather_hook)
-                    
-                def all_gather_general_trigger(layer, input, output,i=count):
-                    if i + 2 < len(self.sharded_layers):
-                        target_layer = self.sharded_layers[i + 2]
-                        full_weight=torch.empty(target_layer.weight.shape[0]*self.world_size, *target_layer.weight.shape[1:], device=target_layer.weight.device, dtype=target_layer.weight.dtype)
-                        handle = dist.all_gather_into_tensor(full_weight,target_layer.weight, async_op=False )
-                        target_layer.weight = nn.Parameter(full_weight)
-                        self.handles.append(handle)
-
-                layer.register_forward_hook(hook=all_gather_general_trigger)
-                
-                # layer.register_forward_hook(hook=shard_and_delete)
-                count +=1
-                    
-                
+                layer.register_forward_pre_hook(all_gather_forward_pre_hook)
+        
     def forward(self,*inputs,**kwargs):
-        self.cur_layer = 0
         return self.module.forward(*inputs, **kwargs)
- 
+    
     def finish_gradient_synchronization(self):
         for handle in self.handles:
             handle.wait()
         self.handles.clear()
         
-        def shard_and_delete(layer):
-            old = layer.weight.data
-            split = layer.weight.shape[0]//self.world_size
-            layer.weight = nn.Parameter(layer.weight[split*self.rank: split*(self.rank + 1)].to(torch.float32))
-            del old
-        
-        for layer in self.sharded_layers:
-            shard_and_delete(layer)
+        def reduce_scatter_backward_post_hook(layer, inputs, outputs):
+            if layer.weight.grad is None:
+                layer.weight.data = layer.original_shard
+                del layer.original_shard
+                print("no grad")
+                return 
+            full_grad = layer.weight.grad
+            shard_grad = torch.empty(full_grad.shape[0]//self.world_size, *full_grad.shape[1:], device=layer.weight.device, dtype=layer.weight.dtype)
+            dist.reduce_scatter_tensor(shard_grad, full_grad)
+            layer.weight.data = layer.original_shard
+            del layer.original_shard
+            print("layer weight", layer.weight.data.shape)
+            print("layer", layer.weight.grad.shape)
+            print(shard_grad.shape)
+            shard_grad = shard_grad / self.world_size
+            layer.weight.grad = shard_grad.to(torch.float32)
+            print("okay reduce")
             
+        for layer in self.sharded_layers:
+            
+            if layer.weight.grad is None:
+                print("no grad in sync")
+                continue
+            
+            reduce_scatter_backward_post_hook(layer, None, None)
+            print("layer weight data in sync", layer.weight.data.shape, "layer grad shape", layer.weight.grad.shape)
         
-        # for param in self.module.parameters():
-        #     if param.grad is not None:
-        #         param.grad.data = param.grad.data/dist.get_world_size()
+        
+        sharded_params = set(id(l.weight) for l in self.sharded_layers)
+
+        for param in self.module.parameters():
+                if id(param) not in sharded_params and param.grad is not None:
+                        dist.all_reduce(param.grad.data)
+                        param.grad.data /= self.world_size
     
     def fsdp_gather_full_params(self):
         state_dict = {}
@@ -106,7 +103,7 @@ class FSDP(nn.Module):
                 continue
             if isinstance(layer, (Linear, Embedding, nn.Linear, nn.Embedding)):
                 full_weight=torch.empty(layer.weight.shape[0]*self.world_size, *layer.weight.shape[1:], device=layer.weight.device, dtype=layer.weight.dtype)
-                dist.all_gather_into_tensor(full_weight,layer.weight, async_op=False)
+                dist.all_gather_into_tensor(full_weight,layer.weight.data, async_op=False)
                 state_dict[name + ".weight"] = full_weight
             else:
                 if hasattr(layer, 'weight'):
@@ -114,5 +111,3 @@ class FSDP(nn.Module):
         
         return state_dict
                 
-                
-        
