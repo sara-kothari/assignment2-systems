@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import torch
 
-# from cs336_systems.flash_attention import *
+from cs336_systems.flash_attention import *
 from cs336_systems.ddp_class import DDP
 from cs336_systems.optimizer_state_sharding import OSS
 from cs336_systems.fsdp import FSDP

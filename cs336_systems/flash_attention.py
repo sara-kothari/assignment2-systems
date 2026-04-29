@@ -5,18 +5,27 @@ import triton.language as tl
 
 @torch.compile
 def fa_pytorch_backward(Q,K,V,O,L, dO, is_causal):
+    
     D = torch.sum(O * dO, dim=-1)
     d = Q.shape[-1]
     S = einsum(Q, K, "... nq d, ... nk d  -> ... nq nk ")/d**0.5
+    N_Q = S.shape[-2]
+    N_K = S.shape[-1]
     if is_causal:
-        q_idx = torch.arange(start=0,end=Q.shape[1] , step=1, out=None, device=Q.device).unsqueeze(-1)
-        k_idx = torch.arange(start=0,end=K.shape[1] , step=1, out=None, device=Q.device).unsqueeze(0)
-        mask = k_idx > q_idx
+        # q_idx = torch.arange(start=0,end=Q.shape[1] , step=1, out=None, device=Q.device).unsqueeze(-1)
+        # k_idx = torch.arange(start=0,end=K.shape[1] , step=1, out=None, device=Q.device).unsqueeze(0)
+        # mask = k_idx > q_idx
+        mask = torch.triu(
+            torch.ones((N_Q, N_K), device=Q.device, dtype=torch.bool),
+            diagonal=1
+        )[None, None, :, :]
         S = torch.where(mask, S + -1e6, S)
-    P = torch.exp(S - L.unsqueeze(-1))
+    
+    # P = torch.exp(S - L.unsqueeze(-1))
+    P = torch.exp(S -L[..., :, None])
     dV = einsum(P, dO,"... nq nk, ... nq d -> ... nk d " )
     dP = einsum(dO, V, "... nq d, ... nk d -> ... nq nk")
-    dS = P * (dP - D.unsqueeze(-1))
+    dS = P * (dP - D[..., :, None])
     dQ = einsum(dS, K, "... nq nk, ... nk d -> ... nq d ")/d**0.5
     dK = einsum(dS, Q, "... nq nk, ... nq d -> ... nk d ")/d**0.5
     return dQ, dK, dV

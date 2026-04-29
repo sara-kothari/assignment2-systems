@@ -43,7 +43,6 @@ class FSDP(nn.Module):
             if compute_dtype is not None:
                 full = full.to(compute_dtype)
             layer.weight.data = full
-        #     print("okay gather")
             if compute_dtype is not None and not isinstance(layer, (Embedding, nn.Embedding)):
                 return (inputs[0].to(compute_dtype),)
         
@@ -53,8 +52,23 @@ class FSDP(nn.Module):
                                 target = self.sharded_layers[idx + 2]
                                 all_gather_forward_pre_hook(target, inputs)
                 return hook
-                
         
+       
+        def reduce_scatter_hook_async(layer):
+                def hook(param):
+                        if param.grad is None:
+                                print("no grad")
+                                return
+                        full_grad = param.grad
+                        shard_grad = torch.empty(full_grad.shape[0]//self.world_size, *full_grad.shape[1:], device=layer.weight.device, dtype=layer.weight.dtype)
+                        handle = dist.reduce_scatter_tensor(shard_grad, full_grad, async_op=True)
+                        self.handles.append((handle, param, shard_grad, layer))
+                        param.grad = None
+                       
+                return hook
+
+                        
+                
         cur_index = 0
         for name, layer in self.module.named_modules():
             if isinstance(layer, (Linear, Embedding, nn.Linear, nn.Embedding)):
@@ -64,6 +78,7 @@ class FSDP(nn.Module):
                 self.sharded_layers.append(layer)
                 layer.register_forward_pre_hook(all_gather_forward_pre_hook)
                 layer.register_forward_hook(all_gather_post_hook(cur_index))
+                layer.weight.register_post_accumulate_grad_hook(reduce_scatter_hook_async(layer))
                 cur_index +=1
         
     def forward(self,*inputs,**kwargs):
@@ -72,40 +87,15 @@ class FSDP(nn.Module):
         return self.module.forward(*inputs, **kwargs)
     
     def finish_gradient_synchronization(self):
-        for handle in self.handles:
+        for handle, param, shard_grad, layer in self.handles:
             handle.wait()
-        self.handles.clear()
-        
-        def reduce_scatter_backward_post_hook(layer, inputs, outputs):
-            if layer.weight.grad is None:
-                layer.weight.data = layer.original_shard
-                del layer.original_shard
-                # print("no grad")
-                return 
-            full_grad = layer.weight.grad
-            shard_grad = torch.empty(full_grad.shape[0]//self.world_size, *full_grad.shape[1:], device=layer.weight.device, dtype=layer.weight.dtype)
-            dist.reduce_scatter_tensor(shard_grad, full_grad)
             layer.weight.data = layer.original_shard
             del layer.original_shard
-        #     print("layer weight", layer.weight.data.shape)
-        #     print("layer", layer.weight.grad.shape)
-        #     print(shard_grad.shape)
             shard_grad = shard_grad / self.world_size
-            layer.weight.grad = shard_grad.to(torch.float32)
-        #     print("okay reduce")
-            
-        for layer in self.sharded_layers:
-            
-            if layer.weight.grad is None:
-                # print("no grad in sync")
-                continue
-            
-            reduce_scatter_backward_post_hook(layer, None, None)
-        #     print("layer weight data in sync", layer.weight.data.shape, "layer grad shape", layer.weight.grad.shape)
-        
+            param.grad = shard_grad.to(torch.float32)
+        self.handles.clear()
         
         sharded_params = set(id(l.weight) for l in self.sharded_layers)
-
         for param in self.module.parameters():
                 if id(param) not in sharded_params and param.grad is not None:
                         dist.all_reduce(param.grad.data)

@@ -29,9 +29,7 @@ class DDP(nn.Module):
             
     def forward(self,*inputs,**kwargs):
         return self.module.forward(*inputs, **kwargs)
-    
-    # def named_parameters(self, *args, **kwargs):
-    #     return self.module.named_parameters(*args, **kwargs)
+
     def finish_gradient_synchronization(self):
         for handle in self.handles:
             handle.wait()
