@@ -31,7 +31,7 @@ import pandas as pd
 @app.function(
     image=build_image(),
     volumes=VOLUME_MOUNTS,
-    gpu="B200:4",
+    gpu="B200:2",
     secrets=[],
     timeout=7200
 )

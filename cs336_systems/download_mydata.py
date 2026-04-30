@@ -15,7 +15,7 @@ def download_from_modal():
 
     data = fetch_file.remote(filename)
 
-    local_path = Path("data/profile_leaderboard_float16.nsys-rep")
+    local_path = Path("data/profile_leaderboard_float16_actual_8layers.nsys-rep")
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
     local_path.write_bytes(data)
