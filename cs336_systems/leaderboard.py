@@ -98,36 +98,20 @@ def distributed_training(rank, world_size,config):
     
     # optimizer = AdamW(, )
     def train_step():
-        torch.cuda.synchronize()
-        
-        t0 = time.time()
-        print("step")
         sharded_optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             res = fsdp_model(labels)
             print("done with forward")
             loss = cross_entropy_loss(res, targets)
             print("done with loss")
-        
-        torch.cuda.synchronize()
-        print(f"forward: {time.time()-t0:.2f}s")
 
-        t1 = time.time()
         loss.backward()
-        torch.cuda.synchronize()
-        print(f"backward: {time.time()-t1:.2f}s")
-        print("done with backward")
         
-        t2 = time.time()
+        print("done with backward")
         fsdp_model.finish_gradient_synchronization()
         sharded_optimizer.step()
-        torch.cuda.synchronize()
-        print(f"optimizer: {time.time()-t2:.2f}s")
-        # with torch.no_grad():
-        #     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        #         res = fsdp_model(labels)
-     
-    timing_results = triton.testing.do_bench(train_step, rep=30000, warmup=10000)
+       
+    timing_results = triton.testing.do_bench(train_step, rep=30_000, warmup=10_000)
     print(timing_results)
     
     
