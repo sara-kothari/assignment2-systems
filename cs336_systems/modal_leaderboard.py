@@ -11,7 +11,7 @@ wandb_secret = modal.Secret.from_name("wandb")
 @app.function(
     image=build_image(),
     volumes=VOLUME_MOUNTS,
-    gpu="B200:2",
+    gpu="B200:4",
     secrets=[wandb_secret],
     timeout=7200
 )

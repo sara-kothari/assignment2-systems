@@ -6,7 +6,7 @@ import timeit
 import numpy as np
 import torch.nn as nn
 from cs336_basics.training import *
-from cs336_basics.model import BasicsTransformerLM, Linear, Embedding
+from cs336_basics.model import *
 import time
 def shard_param(param, rank, world_size):
         dim0 = param.shape[0]
@@ -27,54 +27,24 @@ class FSDP(nn.Module):
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         self.sharded_layers = []
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.module.to(device)
-        print("in FSDP")
+        
         #broadcast the data to ensure same initialization
-        # for param in self.module.parameters():
-        #     dist.broadcast(param.data, src=0)
+        for param in self.module.parameters():
+            dist.broadcast(param.data, src=0)
             
         
         def all_gather_forward_pre_hook(layer, inputs):
-        #     if (layer.all_gathered):
-        #             return
-        #     layer.all_gathered = True
-               
-                if hasattr(layer, 'original_shard'):
-                        return
-                full= torch.empty(layer.weight.shape[0]*self.world_size, *layer.weight.shape[1:], device=layer.weight.device, dtype=torch.float32)
-                dist.all_gather_into_tensor(full, layer.weight.data)
-                layer.original_shard = layer.weight.data
-                if compute_dtype is not None:
-                        full = full.to(compute_dtype)
-                layer.weight.data = full
-                if compute_dtype is not None and not isinstance(layer, (Embedding, nn.Embedding)):
-                        return (inputs[0].to(compute_dtype),)
-        
-        def restore_shard_forward_post_hook(layer, inputs, output):
-                # print(f"restoring, freeing {layer.weight.data.nbytes / 1e9:.2f} GB")
-                layer.weight.data = layer.original_shard
-                del layer.original_shard
-        
-        def all_gather_backward_pre_hook(layer, grad_output):
-                # dtype = compute_dtype if compute_dtype else layer.weight.dtype
-                # full = torch.empty(layer.weight.shape[0]*self.world_size, *layer.weight.shape[1:], device=layer.weight.device, dtype=dtype)
-                # dist.all_gather_into_tensor(full, layer.weight.data)
-                # layer.original_shard = layer.weight.data
-                # # if compute_dtype is not None:
-                # #         full = full.to(compute_dtype)
-                # layer.weight.data = full
-                full = torch.empty(
-                        layer.weight.shape[0]*self.world_size, 
-                        *layer.weight.shape[1:], 
-                        device=layer.weight.device, 
-                        dtype=layer.weight.dtype  # match the actual weight dtype
-                )
-                dist.all_gather_into_tensor(full, layer.weight.data)
-                layer.original_shard = layer.weight.data
-                if compute_dtype is not None:
-                        full = full.to(compute_dtype)
-                layer.weight.data = full
+            if (layer.all_gathered):
+                    return
+            layer.all_gathered = True
+            full= torch.empty(layer.weight.shape[0]*self.world_size, *layer.weight.shape[1:], device=layer.weight.device, dtype=torch.float32)
+            dist.all_gather_into_tensor(full, layer.weight.data)
+            layer.original_shard = layer.weight.data
+            if compute_dtype is not None:
+                full = full.to(compute_dtype)
+            layer.weight.data = full
+            if compute_dtype is not None and not isinstance(layer, (Embedding, nn.Embedding)):
+                return (inputs[0].to(compute_dtype),)
         
         def all_gather_post_hook(idx):
                 def hook(layer, inputs, output):
@@ -98,22 +68,18 @@ class FSDP(nn.Module):
                 return hook
 
                         
-        print("adding hooks")        
+                
         cur_index = 0
         for name, layer in self.module.named_modules():
             if isinstance(layer, (Linear, Embedding, nn.Linear, nn.Embedding)):
-                print(name)
                 shard = shard_param(layer.weight,self.rank, self.world_size)
                 layer.weight = nn.Parameter(shard)
                 layer.all_gathered = False
                 self.sharded_layers.append(layer)
                 layer.register_forward_pre_hook(all_gather_forward_pre_hook)
                 layer.register_forward_hook(all_gather_post_hook(cur_index))
-                layer.register_forward_hook(restore_shard_forward_post_hook)
-                layer.register_full_backward_pre_hook(all_gather_backward_pre_hook)
                 layer.weight.register_post_accumulate_grad_hook(reduce_scatter_hook_async(layer))
                 cur_index +=1
-        print("len sharded", len(self.sharded_layers))
         
     def forward(self,*inputs,**kwargs):
         for layer in self.sharded_layers:

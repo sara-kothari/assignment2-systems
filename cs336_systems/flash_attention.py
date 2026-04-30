@@ -1,11 +1,23 @@
 import torch 
 from einops import einsum
-import triton
-import triton.language as tl
+try:
+    import triton
+    import triton.language as tl
+except ImportError:
+    triton = None
+    tl= None
+
+
+
+def flatten(x):
+    if x.dim() == 4:
+        B, H, T, D = x.shape
+        return x.reshape(B * H, T, D)
+    return x
 
 @torch.compile
 def fa_pytorch_backward(Q,K,V,O,L, dO, is_causal):
-    
+    dO = flatten(dO)
     D = torch.sum(O * dO, dim=-1)
     d = Q.shape[-1]
     S = einsum(Q, K, "... nq d, ... nk d  -> ... nq nk ")/d**0.5
@@ -15,10 +27,7 @@ def fa_pytorch_backward(Q,K,V,O,L, dO, is_causal):
         # q_idx = torch.arange(start=0,end=Q.shape[1] , step=1, out=None, device=Q.device).unsqueeze(-1)
         # k_idx = torch.arange(start=0,end=K.shape[1] , step=1, out=None, device=Q.device).unsqueeze(0)
         # mask = k_idx > q_idx
-        mask = torch.triu(
-            torch.ones((N_Q, N_K), device=Q.device, dtype=torch.bool),
-            diagonal=1
-        )[None, None, :, :]
+        mask = torch.triu(torch.ones((N_Q, N_K), device=Q.device, dtype=torch.bool),diagonal=1)[None, :, :]
         S = torch.where(mask, S + -1e6, S)
     
     # P = torch.exp(S - L.unsqueeze(-1))
@@ -34,6 +43,7 @@ class FlashAttention2PyTorch(torch.autograd.Function):
     @staticmethod
     
     def forward(ctx, Q, K, V, is_causal=False):
+
         #Q.shape = B, T, D
         Bq = 16
         Bk = 16
@@ -150,19 +160,22 @@ def flash_fwd_kernel(
     Q_i = tl.load(Q_block_ptr)
     O_i = tl.zeros((Q_TILE_SIZE,D), dtype=tl.float32)
     l_i = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
-    m_i = tl.full((Q_TILE_SIZE,),float("-inf") ,dtype=tl.float32)
+    # m_i = tl.full((Q_TILE_SIZE,),float("-inf") ,dtype=tl.float32)
+    m_i = tl.full((Q_TILE_SIZE,), -1.0e9, dtype=tl.float32)
     for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
         K_j = tl.load(K_block_ptr)
         V_j = tl.load(V_block_ptr)
-        S_ij = tl.dot(Q_i, tl.trans(K_j))*scale
+        # S_ij = tl.dot(Q_i, tl.trans(K_j))*scale
+        S_ij = tl.dot(Q_i, tl.trans(K_j)).to(tl.float32) * scale
         if is_causal:
             q_idx = tl.arange(0, Q_TILE_SIZE) + query_tile_index * Q_TILE_SIZE
             k_idx =  tl.arange(0, K_TILE_SIZE) + j * K_TILE_SIZE
             mask = k_idx[None, :] > q_idx[:, None]
             S_ij = tl.where(mask, S_ij + -1e6, S_ij)
         prev_m = m_i
-        m_i = tl.maximum(m_i, tl.max(S_ij, axis=1))
-        P_ij = tl.math.exp(S_ij - m_i[:, None])
+        m_i = tl.maximum(m_i, tl.max(S_ij.to(tl.float32), axis=1))
+        # P_ij = tl.math.exp(S_ij - m_i[:, None])
+        P_ij = tl.exp((S_ij - m_i[:, None]).to(tl.float32))
         l_i = tl.math.exp(prev_m - m_i)*l_i + tl.sum(P_ij, axis=1)
         O_i = tl.math.exp(prev_m - m_i)[:, None]*O_i + tl.dot(P_ij.to(V_j.dtype),V_j)
         K_block_ptr = K_block_ptr.advance((K_TILE_SIZE,0))
@@ -173,12 +186,118 @@ def flash_fwd_kernel(
     tl.store(L_block_ptr, L_i.to(L_block_ptr.type.element_ty))
     
 
+@triton.jit
+def flash_bwd_kernel_1(
+    Q_ptr, K_ptr, V_ptr,
+    O_ptr, L_ptr,
+    stride_qb, stride_qq, stride_qd,
+    stride_kb, stride_kk, stride_kd,
+    stride_vb, stride_vk, stride_vd,
+    stride_ob, stride_oq, stride_od,
+    stride_lb, stride_lq,
+    N_QUERIES, N_KEYS,
+    scale,
+    D: tl.constexpr,
+    Q_TILE_SIZE: tl.constexpr,
+    K_TILE_SIZE: tl.constexpr,
+    is_causal: tl.constexpr,
+    ):
+    # Program indices
+    query_tile_index = tl.program_id(0)
+    batch_index = tl.program_id(1)
+    # Offset each pointer with the corresponding batch index
+    # multiplied with the batch stride for each tensor
+    
+    #T,B
+    Q_block_ptr = tl.make_block_ptr(
+        Q_ptr + batch_index * stride_qb,
+        shape=(N_QUERIES, D),
+        strides=(stride_qq, stride_qd),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+        )
+
+    K_block_ptr = tl.make_block_ptr(
+        K_ptr + batch_index * stride_kb,
+        shape=(N_KEYS, D),
+        strides=(stride_kk, stride_kd),
+        offsets=(0, 0),
+        block_shape=(K_TILE_SIZE, D),
+        order=(1, 0),
+        )
+
+    V_block_ptr = tl.make_block_ptr(
+        V_ptr + batch_index * stride_vb,
+        shape=(N_KEYS, D),
+        strides=(stride_vk, stride_vd),
+        offsets=(0, 0),
+        block_shape=(K_TILE_SIZE, D),
+        order=(1, 0),
+        )
+    
+    O_block_ptr = tl.make_block_ptr(
+        O_ptr + batch_index * stride_ob,
+        shape=(N_QUERIES, D),
+        strides=(stride_oq, stride_od),
+        offsets=(query_tile_index * Q_TILE_SIZE, 0),
+        block_shape=(Q_TILE_SIZE, D),
+        order=(1, 0),
+        )
+    
+    L_block_ptr = tl.make_block_ptr(
+        L_ptr + batch_index * stride_lb,
+        shape=(N_QUERIES,),
+        strides=(stride_lq,),
+        offsets=(query_tile_index * Q_TILE_SIZE,),
+        block_shape=(Q_TILE_SIZE,),
+        order=(0,),
+        )
+    Q_i = tl.load(Q_block_ptr)
+    O_i = tl.zeros((Q_TILE_SIZE,D), dtype=tl.float32)
+    l_i = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
+    # m_i = tl.full((Q_TILE_SIZE,),float("-inf") ,dtype=tl.float32)
+    m_i = tl.full((Q_TILE_SIZE,), -1.0e9, dtype=tl.float32)
+    for j in range(tl.cdiv(N_KEYS, K_TILE_SIZE)):
+        K_j = tl.load(K_block_ptr)
+        V_j = tl.load(V_block_ptr)
+        # S_ij = tl.dot(Q_i, tl.trans(K_j))*scale
+        S_ij = tl.dot(Q_i, tl.trans(K_j)).to(tl.float32) * scale
+        if is_causal:
+            q_idx = tl.arange(0, Q_TILE_SIZE) + query_tile_index * Q_TILE_SIZE
+            k_idx =  tl.arange(0, K_TILE_SIZE) + j * K_TILE_SIZE
+            mask = k_idx[None, :] > q_idx[:, None]
+            S_ij = tl.where(mask, S_ij + -1e6, S_ij)
+        prev_m = m_i
+        m_i = tl.maximum(m_i, tl.max(S_ij.to(tl.float32), axis=1))
+        # P_ij = tl.math.exp(S_ij - m_i[:, None])
+        P_ij = tl.exp((S_ij - m_i[:, None]).to(tl.float32))
+        l_i = tl.math.exp(prev_m - m_i)*l_i + tl.sum(P_ij, axis=1)
+        O_i = tl.math.exp(prev_m - m_i)[:, None]*O_i + tl.dot(P_ij.to(V_j.dtype),V_j)
+        K_block_ptr = K_block_ptr.advance((K_TILE_SIZE,0))
+        V_block_ptr = V_block_ptr.advance((K_TILE_SIZE,0))
+    O_i = (1/l_i[:, None])*O_i
+    L_i = m_i + tl.math.log(l_i)
+    tl.store(O_block_ptr, O_i.to(O_block_ptr.type.element_ty))
+    tl.store(L_block_ptr, L_i.to(L_block_ptr.type.element_ty))
+    
+
+
+    
     
 class FA2Triton(torch.autograd.Function):
+    print("in FA2 yay")
     @staticmethod
     def forward(ctx, Q, K, V, is_causal=False):
-        Q_TILE_SIZE = 16
-        K_TILE_SIZE = 16
+        Q_TILE_SIZE = 64
+        K_TILE_SIZE = 64
+        ctx.q_shape = Q.shape
+        ctx.k_shape = K.shape
+        ctx.v_shape = V.shape
+        Q = flatten(Q)
+        K = flatten(K)
+        V = flatten(V)
+        
         O = torch.empty_like(Q, device=Q.device)
         L = torch.empty((Q.shape[0], Q.shape[1]), device=Q.device, dtype=Q.dtype)
         D = Q.shape[-1]
@@ -202,12 +321,47 @@ class FA2Triton(torch.autograd.Function):
             )
         ctx.save_for_backward(Q,K,V,O,L)
         ctx.is_causal = is_causal
+        O = O.reshape(ctx.q_shape)
         return O
 
     
     @staticmethod
     def backward(ctx, dO):
         Q,K,V,O,L = ctx.saved_tensors
-        dQ, dK, dV = fa_pytorch_backward(Q,K,V,O,L,dO, ctx.is_causal)
+        dQ, dK, dV = fa_pytorch_backward( Q,K,V,O,L,dO, ctx.is_causal)
+        dQ = dQ.reshape(ctx.q_shape)
+        dK = dK.reshape(ctx.k_shape)
+        dV = dV.reshape(ctx.v_shape)
         return dQ, dK, dV, None
     
+    def backward_2(ctx, dO):
+        Q_TILE_SIZE = 64
+        K_TILE_SIZE = 64
+        Q,K,V,O,L = ctx.saved_tensors
+        dQ = torch.empty_like(Q, device=Q.device)
+        dK = torch.empty_like(K, device=K.device)
+        dV = torch.empty_like(V, device=V.device)
+        D = torch.sum(dO*O, dim=-1)
+        d = Q.shape[-1]
+        scale = 1/d**0.5
+        N_QUERIES = Q.shape[1]
+        N_KEYS = K.shape[1]
+        flash_fwd_kernel[(triton.cdiv(Q.shape[-2], Q_TILE_SIZE),Q.shape[0],)](
+            Q, K, V,
+            O, L,
+            Q.stride(0), Q.stride(1), Q.stride(2),
+            K.stride(0), K.stride(1), K.stride(2),
+            V.stride(0), V.stride(1), V.stride(2),
+            O.stride(0), O.stride(1), O.stride(2),
+            L.stride(0), L.stride(1),
+            N_QUERIES, N_KEYS,
+            scale,
+            D,
+            Q_TILE_SIZE,
+            K_TILE_SIZE,
+            is_causal,
+            )
+        ctx.save_for_backward(Q,K,V,O,L)
+        ctx.is_causal = is_causal
+        O = O.reshape(ctx.q_shape)
+        return O

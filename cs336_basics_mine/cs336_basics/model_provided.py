@@ -215,7 +215,7 @@ class BasicsTransformerLM(nn.Module):
         self.lm_head = Linear(d_model, vocab_size)
         # Tie the weights, since the paper mentions that "we share the same weight
         # matrix between the two embedding layers and the pre-softmax linear transformation"
-        # self.lm_head.weight = self.token_embeddings.weight
+        self.lm_head.weight = self.token_embeddings.weight
         # report number of parameters
         logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.2f}M")
 
@@ -243,15 +243,20 @@ class BasicsTransformerLM(nn.Module):
         # NOTE: paper mentions "In the embedding layers, we multiply those
         # weights by sqrt(d_model)", but we aren't doing that here.
         embedded_tokens = self.token_embeddings(x)
+        print("got embeddings")
 
         # (batch size, sequence_length, d_model)
         # x = self.positional_encoder(embedded_tokens, positions)
         x = embedded_tokens
 
+        count = 0
         for layer in self.layers:
             # (batch size, sequence_length, d_model)
+            count +=1 
             x = layer(x)
+            print(f"done with layer {count}")
         # (batch size, sequence_length, d_model)
+        print("all layers done")
         x = self.ln_final(x)
         # (batch size, sequence_length, vocab_size)
         logits = self.lm_head(x)
@@ -363,6 +368,7 @@ class TransformerBlock(nn.Module):
             num_heads=num_heads,
             positional_encoder=positional_encoder,
         )
+    
         self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff)
         self.ln1 = RMSNorm(d_model)
         self.ln2 = RMSNorm(d_model)
@@ -380,6 +386,7 @@ class TransformerBlock(nn.Module):
         # description in the paper.
         # Apply the multi-head self-attention sublayer
         x_attn = self.attn(self.ln1(x))
+        print("done with attention")
         attn_sublayer_output = x + x_attn
 
         # Apply the feed-forward sublayer
