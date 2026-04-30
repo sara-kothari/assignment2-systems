@@ -30,16 +30,6 @@ class Config:
     is_causal = True
     batch_size = 2
 
-# class Config:
-#     ctx_len = 1024        
-#     vocab_size = 50000   
-#     d_model = 512
-#     d_ff = 2048
-#     num_layers = 4
-#     num_heads = 8
-#     torch_dtype = torch.bfloat16
-#     is_causal = True
-#     batch_size = 2
 
 
     
@@ -53,6 +43,7 @@ def setup(rank, world_size):
 
 def fa_forward(Q,K,V, is_causal=True, mask=None):
     return FA2Triton.apply(Q,K,V, True)
+
 cs336_basics.model.scaled_dot_product_attention = fa_forward 
 
 def distributed_training(rank, world_size,config):
@@ -99,36 +90,35 @@ def distributed_training(rank, world_size,config):
     # optimizer = AdamW(, )
     def train_step():
         torch.cuda.synchronize()
-        
         t0 = time.time()
-        print("step")
         sharded_optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            res = fsdp_model(labels)
-            print("done with forward")
-            loss = cross_entropy_loss(res, targets)
-            print("done with loss")
+        
+        with nvtx.range("forward"):
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                res = fsdp_model(labels)
+                loss = cross_entropy_loss(res, targets)
         
         torch.cuda.synchronize()
-        print(f"forward: {time.time()-t0:.2f}s")
-
-        t1 = time.time()
-        loss.backward()
-        torch.cuda.synchronize()
-        print(f"backward: {time.time()-t1:.2f}s")
-        print("done with backward")
         
-        t2 = time.time()
-        fsdp_model.finish_gradient_synchronization()
-        sharded_optimizer.step()
+        with nvtx.range("backward"):
+            loss.backward()
+        
         torch.cuda.synchronize()
-        print(f"optimizer: {time.time()-t2:.2f}s")
-        # with torch.no_grad():
-        #     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        #         res = fsdp_model(labels)
+        
+        with nvtx.range("optimizer"):
+            fsdp_model.finish_gradient_synchronization()
+            sharded_optimizer.step()
+        
+        torch.cuda.synchronize()
      
-    timing_results = triton.testing.do_bench(train_step, rep=30000, warmup=10000)
-    print(timing_results)
+    # timing_results = triton.testing.do_bench(train_step, rep=30000, warmup=10000)
+    # print(timing_results)
+    train_step()
+    train_step()
+    train_step()
+    train_step()
+    train_step()
+    
     
     
     

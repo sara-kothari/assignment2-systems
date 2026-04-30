@@ -102,15 +102,15 @@ class FSDP(nn.Module):
         cur_index = 0
         for name, layer in self.module.named_modules():
             if isinstance(layer, (Linear, Embedding, nn.Linear, nn.Embedding)):
-                print(name)
+                # print(name)
                 shard = shard_param(layer.weight,self.rank, self.world_size)
                 layer.weight = nn.Parameter(shard)
                 layer.all_gathered = False
                 self.sharded_layers.append(layer)
                 layer.register_forward_pre_hook(all_gather_forward_pre_hook)
                 layer.register_forward_hook(all_gather_post_hook(cur_index))
-                layer.register_forward_hook(restore_shard_forward_post_hook)
-                layer.register_full_backward_pre_hook(all_gather_backward_pre_hook)
+                # layer.register_forward_hook(restore_shard_forward_post_hook)
+                # layer.register_full_backward_pre_hook(all_gather_backward_pre_hook)
                 layer.weight.register_post_accumulate_grad_hook(reduce_scatter_hook_async(layer))
                 cur_index +=1
         print("len sharded", len(self.sharded_layers))

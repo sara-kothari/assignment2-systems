@@ -11,7 +11,7 @@ wandb_secret = modal.Secret.from_name("wandb")
 @app.function(
     image=build_image(),
     volumes=VOLUME_MOUNTS,
-    gpu="B200:2",
+    gpu="B200:4",
     secrets=[wandb_secret],
     timeout=7200
 )
@@ -33,10 +33,11 @@ def benchmark(config):
     "--trace=cuda,cudnn,cublas,nvtx "
     "--pytorch=autograd-nvtx "
     "--gpu-metrics-devices=0 "
-    f"-- python -m cs336_systems.naive_ddp_benchmarking --config {config_path}"
+    f"-- python -m cs336_systems.leaderboard_nsys --config {config_path}"
     )
     subprocess.run(cmd, shell=True, check=True)
-    shutil.copy("/tmp/profile_result.nsys-rep", f"{DATA_PATH}/profile_ddp_naive.nsys-rep")
+    shutil.copy("/tmp/profile_result.nsys-rep", f"{DATA_PATH}/profile_leaderboard.nsys-rep")
+
 
 @app.local_entrypoint()
 def modal_main(config="configs/base_config.json"):

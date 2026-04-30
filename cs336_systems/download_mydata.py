@@ -11,11 +11,11 @@ def fetch_file(filename: str) -> bytes:
 
 @app.local_entrypoint()
 def download_from_modal():
-    filename ="results_fa_v_torch.csv"
+    filename ="profile_leaderboard.nsys-rep"
 
     data = fetch_file.remote(filename)
 
-    local_path = Path("data/results_fa_v_torch.csv")
+    local_path = Path("data/profile_leaderboard_change_kernle.nsys-rep")
     local_path.parent.mkdir(parents=True, exist_ok=True)
 
     local_path.write_bytes(data)

@@ -7,8 +7,10 @@ import numpy as np
 import torch.nn as nn
 from cs336_basics.training import *
 from cs336_basics.transformer import *
+import argparse
 
-
+import torch.cuda.nvtx as nvtx
+import json
 
 def setup(rank, world_size):
     os.environ["MASTER_ADDR"] ="localhost"
@@ -50,57 +52,68 @@ def distributed_training(rank, world_size, config):
         loss = cross_entropy_loss(logits, my_targets)
         loss.backward()
         #unoptmized:
-        # for param in model.parameters():
-        #     if param.grad is not None:
-        #         dist.all_reduce(param.grad.data)
-        #         param.grad.data = param.grad.data/world_size
+        for param in model.parameters():
+            if param.grad is not None:
+                dist.all_reduce(param.grad.data)
+                param.grad.data = param.grad.data/world_size
         
         #flatten optimized
-        device_grads = [param.grad.data for param in model.parameters() if param.grad is not None]
-        flat_grads = torch._utils._flatten_dense_tensors(device_grads)
-        dist.all_reduce(flat_grads)
-        flat_grads = flat_grads/world_size
-        unflattened = torch._utils._unflatten_dense_tensors(flat_grads, device_grads)
-        params_with_grads = [param for param in model.parameters() if param.grad is not None]
-        for param,combined in zip(params_with_grads, unflattened):
-            if param.grad is not None:
-                param.grad.data = combined
+        # device_grads = [param.grad.data for param in model.parameters() if param.grad is not None]
+        # flat_grads = torch._utils._flatten_dense_tensors(device_grads)
+        # dist.all_reduce(flat_grads)
+        # flat_grads = flat_grads/world_size
+        # unflattened = torch._utils._unflatten_dense_tensors(flat_grads, device_grads)
+        # params_with_grads = [param for param in model.parameters() if param.grad is not None]
+        # for param,combined in zip(params_with_grads, unflattened):
+        #     if param.grad is not None:
+        #         param.grad.data = combined
+                
         optimizer.step()
     
     
     #training
     for step in range(1, config["total_steps"] + 1):
+        
         start = timeit.default_timer()
-        optimizer.zero_grad()
-        logits = model(my_data)
-        loss = cross_entropy_loss(logits, my_targets)
-        loss.backward()
-        torch.cuda.synchronize()
-        comm_start = timeit.default_timer()
-        #unoptimized
-        # for param in model.parameters():
-        #     if param.grad is not None:
-        #         dist.all_reduce(param.grad.data)
-        #         param.grad.data = param.grad.data/world_size
-        
-        #flatten optimized
-        device_grads = [param.grad.data for param in model.parameters() if param.grad is not None]
-        flat_grads = torch._utils._flatten_dense_tensors(device_grads)
-        dist.all_reduce(flat_grads)
-        flat_grads = flat_grads/world_size
-        unflattened = torch._utils._unflatten_dense_tensors(flat_grads, device_grads)
-        params_with_grads = [param for param in model.parameters() if param.grad is not None]
-        for param,combined in zip(params_with_grads, unflattened):
-            if param.grad is not None:
-                param.grad.data = combined
-        
-        torch.cuda.synchronize()
-        comm_end = timeit.default_timer()
-        grad_comm_timings.append(comm_end - comm_start)
-        optimizer.step()
-        torch.cuda.synchronize()
-        end = timeit.default_timer()
-        timings.append(end - start)
+        with nvtx.range("step"):
+            # optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
+            with nvtx.range("forward"):
+                logits = model(my_data)
+                
+            with nvtx.range("loss_backward"):
+                loss = cross_entropy_loss(logits, my_targets)
+                loss.backward()
+            torch.cuda.synchronize()
+            comm_start = timeit.default_timer()
+            with nvtx.range("allreduce_comm"):
+            #unoptimized
+                for param in model.parameters():
+                    if param.grad is not None:
+                        dist.all_reduce(param.grad.data)
+                        param.grad.data = param.grad.data/world_size
+            
+            #flatten optimized
+            # device_grads = [param.grad.data for param in model.parameters() if param.grad is not None]
+            # flat_grads = torch._utils._flatten_dense_tensors(device_grads)
+            # dist.all_reduce(flat_grads)
+            # flat_grads = flat_grads/world_size
+            # unflattened = torch._utils._unflatten_dense_tensors(flat_grads, device_grads)
+            # params_with_grads = [param for param in model.parameters() if param.grad is not None]
+            # for param,combined in zip(params_with_grads, unflattened):
+            #     if param.grad is not None:
+            #         param.grad.data = combined
+            
+            torch.cuda.synchronize()
+            comm_end = timeit.default_timer()
+            grad_comm_timings.append(comm_end - comm_start)
+            with nvtx.range("optimizer"):
+                optimizer.step()
+      
+            torch.cuda.synchronize()
+            end = timeit.default_timer()
+            timings.append(end - start)
+
         
     all_avg_timings = [None for i in range(world_size)]
     dist.all_gather_object(all_avg_timings, np.mean(timings))
@@ -115,5 +128,9 @@ def main(config):
     mp.spawn(fn=distributed_training, args=(world_size,config), nprocs=world_size, join=True)
             
 if __name__ =="__main__":
-    config = {}
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    args = parser.parse_args()
+    with open(args.config, "r") as f:
+        config = json.load(f)
     main(config)

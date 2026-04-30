@@ -16,8 +16,32 @@ wandb_secret = modal.Secret.from_name("wandb")
     timeout=7200
 )
 def benchmark(config):
-    from cs336_systems.ddp_overlap_bench import main
-    main(config)
+    import os
+    import subprocess
+    import json
+    import tempfile
+    import shutil
+    import torch.cuda.nvtx as nvtx
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+        json.dump(config, f)
+        config_path = f.name
+
+    cmd = (
+    "PYTORCH_ALLOC_CONF=backend:cudaMallocAsync "
+    "PYTORCH_NO_CUDA_MEMORY_CACHING=1 "
+    "nsys profile -o /tmp/profile_result "
+    "--trace=cuda,cudnn,cublas,nvtx "
+    "--pytorch=autograd-nvtx "
+    "--gpu-metrics-devices=0 "
+    f"-- python -m cs336_systems.ddp_overlap_bench --config {config_path}"
+    )
+    subprocess.run(cmd, shell=True, check=True)
+    shutil.copy("/tmp/profile_result.nsys-rep", f"{DATA_PATH}/profile_ddp__again_final.nsys-rep")
+    # return main(config)
+    # return {}
+
+    # from cs336_systems.ddp_overlap_bench import main
+    # main(config)
 
 @app.local_entrypoint()
 def modal_main(config="configs/base_config.json"):
