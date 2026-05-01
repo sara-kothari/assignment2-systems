@@ -30,7 +30,16 @@ class Config:
     is_causal = True
     batch_size = 2
 
-
+# class Config:
+#     ctx_len = 512
+#     vocab_size = 10000
+#     d_model = 2560
+#     d_ff = 10240
+#     num_layers = 32
+#     num_heads = 32
+#     torch_dtype = torch.bfloat16
+#     is_causal = True
+#     batch_size = 4
 
     
 cfg = Config()

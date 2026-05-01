@@ -19,17 +19,27 @@ from cs336_systems.optimizer_state_sharding import OSS
 import argparse
 import json
 import torch.cuda.nvtx as nvtx
+# class Config:
+#     ctx_len = 32768
+#     vocab_size = 151936
+#     d_model = 4096
+#     d_ff = 11008
+#     num_layers = 34
+#     num_heads = 32
+#     torch_dtype = torch.bfloat16
+#     is_causal = True
+#     batch_size = 2
+
 class Config:
-    ctx_len = 32768
-    vocab_size = 151936
-    d_model = 4096
-    d_ff = 11008
-    num_layers = 34
+    ctx_len = 512
+    vocab_size = 10000
+    d_model = 2560
+    d_ff = 10240
+    num_layers = 32
     num_heads = 32
     torch_dtype = torch.bfloat16
     is_causal = True
-    batch_size = 2
-
+    batch_size = 4
 # class Config:
 #     ctx_len = 1024        
 #     vocab_size = 50000   
@@ -74,10 +84,7 @@ def distributed_training(rank, world_size,config):
     cfg.d_ff
 ).cuda()
    
-    # model.to("cuda", dtype=torch.bfloat16) 
-    print("start compiling")
-    # model = torch.compile(model)
-    print("done complling")
+    
     labels = labels.to("cuda")
     targets = targets.to("cuda")
     fsdp_model = FSDP(model,compute_dtype=torch.bfloat16)

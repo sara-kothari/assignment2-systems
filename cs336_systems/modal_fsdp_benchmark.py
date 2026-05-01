@@ -6,17 +6,17 @@ import pandas as pd
 
 
 
+wandb_secret = modal.Secret.from_name("wandb")
 
 @app.function(
     image=build_image(),
     volumes=VOLUME_MOUNTS,
     gpu="B200:2",
-    secrets=[],
+    secrets=[wandb_secret],
     timeout=7200
 )
 def benchmark(config):
-    import torch
-    from cs336_systems.leaderboard import main
+    from cs336_systems.fsdp_data_profile import main
     main(config)
 
 @app.local_entrypoint()
@@ -24,4 +24,4 @@ def modal_main(config="configs/base_config.json"):
     with open(config, "r") as f:
         config_dict = json.load(f)
     benchmark.remote(config_dict)
-    
+   

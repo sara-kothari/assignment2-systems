@@ -7,6 +7,7 @@ import numpy as np
 import torch.nn as nn
 from cs336_basics.training import *
 from cs336_basics.model import BasicsTransformerLM, Linear, Embedding
+# from cs336_basics.transformer import Linear, Embedding
 import time
 def shard_param(param, rank, world_size):
         dim0 = param.shape[0]
@@ -109,8 +110,8 @@ class FSDP(nn.Module):
                 self.sharded_layers.append(layer)
                 layer.register_forward_pre_hook(all_gather_forward_pre_hook)
                 layer.register_forward_hook(all_gather_post_hook(cur_index))
-                # layer.register_forward_hook(restore_shard_forward_post_hook)
-                # layer.register_full_backward_pre_hook(all_gather_backward_pre_hook)
+                layer.register_forward_hook(restore_shard_forward_post_hook)
+                layer.register_full_backward_pre_hook(all_gather_backward_pre_hook)
                 layer.weight.register_post_accumulate_grad_hook(reduce_scatter_hook_async(layer))
                 cur_index +=1
         print("len sharded", len(self.sharded_layers))
