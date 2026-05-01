@@ -535,12 +535,12 @@ class CausalMultiHeadSelfAttention(nn.Module):
             Q = self.positional_encoder(Q, token_positions)
             K = self.positional_encoder(K, token_positions)
 
-        # # Construct causal mask
-        # iota = torch.arange(sequence_length, device=x.device)
-        # qi = rearrange(iota, "query -> query 1")
-        # kj = rearrange(iota, "key   -> 1   key")
-        # causal_mask = qi >= kj  # (query, key)
-        # causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
+        # Construct causal mask
+        iota = torch.arange(sequence_length, device=x.device)
+        qi = rearrange(iota, "query -> query 1")
+        kj = rearrange(iota, "key   -> 1   key")
+        causal_mask = qi >= kj  # (query, key)
+        causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
 
         # Shape: (..., num_heads, sequence_length, d_k)
         # attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)

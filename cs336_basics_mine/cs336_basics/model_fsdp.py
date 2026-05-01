@@ -18,9 +18,7 @@ from cs336_basics.nn_utils import softmax
 logger = logging.getLogger(__name__)
 from torch.utils.checkpoint import checkpoint
 
-from cs336_systems.flash_attention import *
-def fa_forward(Q,K,V, is_causal=True):
-    return FA2Triton.apply(Q,K,V, is_causal)
+
 
 class Linear(nn.Module):
     def __init__(self, d_in: int, d_out: int):
@@ -252,22 +250,22 @@ class BasicsTransformerLM(nn.Module):
         # (batch size, sequence_length, d_model)
         # x = self.positional_encoder(embedded_tokens, positions)
         x = embedded_tokens
+        def run_2_blocks(layer1, layer2, x):
+            print(f"in run_2_blocks, mem={torch.cuda.memory_allocated()/1e9:.2f}GB")
+            x = layer1(x)
+            x = layer2(x)
+            return x
+            
 
         count = 0
-        for layer in self.layers:
-            # (batch size, sequence_length, d_model)
-            # if count % 2 == 1:
-            #     x = checkpoint(layer, x, use_reentrant=False)
-            # else:
-            #     x = layer(x)
-            count +=1 
-            
-           
-            #using checkpointing
-            
-            with torch.cuda.nvtx.range(f"layer_{count}"):
-       
-                x = checkpoint(layer, x, use_reentrant=False)
+        
+        # for layer in self.layers:
+        #     with torch.cuda.nvtx.range(f"layer_{count}"):
+        #         x = checkpoint(layer, x, use_reentrant=False)
+        #     count +=1
+        while count < len(self.layers):
+            x = checkpoint(run_2_blocks, self.layers[count], self.layers[count + 1], x, use_reentrant=False)
+            count +=2
             
             # print(f"done with layer {count}")
             # print(f"layer {count}, mem = {torch.cuda.memory_allocated()/1e9:.2f} GB")
@@ -535,16 +533,16 @@ class CausalMultiHeadSelfAttention(nn.Module):
             Q = self.positional_encoder(Q, token_positions)
             K = self.positional_encoder(K, token_positions)
 
-        # # Construct causal mask
-        # iota = torch.arange(sequence_length, device=x.device)
-        # qi = rearrange(iota, "query -> query 1")
-        # kj = rearrange(iota, "key   -> 1   key")
-        # causal_mask = qi >= kj  # (query, key)
-        # causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
+        # Construct causal mask
+        iota = torch.arange(sequence_length, device=x.device)
+        qi = rearrange(iota, "query -> query 1")
+        kj = rearrange(iota, "key   -> 1   key")
+        causal_mask = qi >= kj  # (query, key)
+        causal_mask = causal_mask.__getitem__((None,) * len(batch_dims) + (...,))  # Add appropriate leading dimensions
 
         # Shape: (..., num_heads, sequence_length, d_k)
-        # attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
-        attn_output = fa_forward(Q,K,V, True)
+        attn_output = scaled_dot_product_attention(K=K, Q=Q, V=V, mask=causal_mask)
+        #attn_output = fa_forward(Q,K,V, True)
         #testing
         # attn_output = torch.nn.functional.scaled_dot_product_attention(Q, K, V, is_causal=True)
         # Concatenate the attention output from all heads.
